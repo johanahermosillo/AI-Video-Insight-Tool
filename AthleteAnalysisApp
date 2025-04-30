@@ -1,0 +1,955 @@
+import os
+import tkinter as tk
+from tkinter import filedialog, ttk, messagebox
+import threading
+import time
+import cv2
+import numpy as np
+import datetime
+from PIL import Image, ImageTk
+import json
+
+class AthleteAnalysisApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Analysis of Athletes")
+        self.root.geometry("1200x700")
+        self.root.resizable(True, True)
+        
+        # Variables
+        self.selected_video = None
+        self.playing = False
+        self.cap = None
+        self.current_frame = None
+        self.frame_count = 0
+        self.current_frame_pos = 0
+        self.analysis_results = {}
+        self.annotations = []
+        self.athlete_name = tk.StringVar(value="")
+        self.sport_type = tk.StringVar(value="")
+        self.session_date = tk.StringVar(value=datetime.datetime.now().strftime("%Y-%m-%d"))
+        
+        # Create UI elements
+        self.create_menu()
+        self.create_widgets()
+        
+        # Create directory for saving data if it doesn't exist
+        os.makedirs("athlete_data", exist_ok=True)
+    
+    def create_menu(self):
+        menubar = tk.Menu(self.root)
+        
+        # File menu
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="Open Video", command=self.browse_video)
+        file_menu.add_command(label="Save Analysis", command=self.save_analysis)
+        file_menu.add_command(label="Upload Analysis", command=self.load_analysis)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self.root.quit)
+        menubar.add_cascade(label="File", menu=file_menu)
+        
+        # Analysis menu
+        analysis_menu = tk.Menu(menubar, tearoff=0)
+        analysis_menu.add_command(label="Analyze Posture", command=lambda: self.analyze("posture"))
+        analysis_menu.add_command(label="Detect Posibles Injuries", command=lambda: self.analyze("injuries"))
+        analysis_menu.add_command(label="Analysis of Movement", command=lambda: self.analyze("movement"))
+        menubar.add_cascade(label="Analysis", menu=analysis_menu)
+        
+        # Help menu
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="About", command=self.show_about)
+        help_menu.add_command(label="Manual", command=self.show_manual)
+        menubar.add_cascade(label="Help", menu=help_menu)
+        
+        self.root.config(menu=menubar)
+    
+    def create_widgets(self):
+        # Main container
+        main_paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
+        main_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Left panel for video and controls
+        left_frame = ttk.Frame(main_paned)
+        main_paned.add(left_frame, weight=3)
+        
+        # Right panel for analysis and notes
+        right_frame = ttk.Notebook(main_paned)
+        main_paned.add(right_frame, weight=1)
+        
+        # Video display area
+        self.video_frame = ttk.LabelFrame(left_frame, text="Video")
+        self.video_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        self.canvas = tk.Canvas(self.video_frame, bg="black")
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+        self.canvas.bind("<Button-1>", self.add_annotation)
+        
+        # Video controls
+        controls_frame = ttk.Frame(left_frame)
+        controls_frame.pack(fill=tk.X, pady=5)
+        
+        self.play_btn = ttk.Button(controls_frame, text="▶ Play", command=self.toggle_play)
+        self.play_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.reset_btn = ttk.Button(controls_frame, text="⟲ Reset", command=self.reset_video)
+        self.reset_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.progress_var = tk.DoubleVar()
+        self.progress = ttk.Scale(controls_frame, from_=0, to=100, variable=self.progress_var, 
+                               orient=tk.HORIZONTAL, command=self.seek_video)
+        self.progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        
+        # Right panel tabs
+        athlete_info_tab = ttk.Frame(right_frame)
+        analysis_tab = ttk.Frame(right_frame)
+        feedback_tab = ttk.Frame(right_frame)
+        notes_tab = ttk.Frame(right_frame)
+        
+        right_frame.add(athlete_info_tab, text="Athlete")
+        right_frame.add(analysis_tab, text="Analysis")
+        right_frame.add(feedback_tab, text="Feedback")
+        right_frame.add(notes_tab, text="Notes")
+        
+        # Athlete info
+        self.setup_athlete_info_tab(athlete_info_tab)
+        
+        # Analysis tab
+        self.setup_analysis_tab(analysis_tab)
+        
+        # Feedback tab
+        self.setup_feedback_tab(feedback_tab)
+        
+        # Notes tab
+        self.setup_notes_tab(notes_tab)
+    
+    def setup_athlete_info_tab(self, parent):
+        info_frame = ttk.Frame(parent, padding=10)
+        info_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Basic info
+        ttk.Label(info_frame, text="Name of the Athlete:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        ttk.Entry(info_frame, textvariable=self.athlete_name).grid(row=0, column=1, sticky=tk.EW, pady=5)
+        
+        ttk.Label(info_frame, text="Sport:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        sports = ["Football", "Basketball", "Track", "Swimming", "Tenis", "Other"]
+        sport_combo = ttk.Combobox(info_frame, textvariable=self.sport_type, values=sports)
+        sport_combo.grid(row=1, column=1, sticky=tk.EW, pady=5)
+        
+        ttk.Label(info_frame, text="Date:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        ttk.Entry(info_frame, textvariable=self.session_date).grid(row=2, column=1, sticky=tk.EW, pady=5)
+        
+        # Measurements
+        measurements_frame = ttk.LabelFrame(info_frame, text="Measure", padding=10)
+        measurements_frame.grid(row=3, column=0, columnspan=2, sticky=tk.EW, pady=10)
+        
+        self.height_var = tk.StringVar(value="")
+        self.weight_var = tk.StringVar(value="")
+        self.age_var = tk.StringVar(value="")
+        
+        ttk.Label(measurements_frame, text="Height (cm):").grid(row=0, column=0, sticky=tk.W, pady=2)
+        ttk.Entry(measurements_frame, textvariable=self.height_var).grid(row=0, column=1, sticky=tk.EW, pady=2)
+        
+        ttk.Label(measurements_frame, text="Weight (kg):").grid(row=1, column=0, sticky=tk.W, pady=2)
+        ttk.Entry(measurements_frame, textvariable=self.weight_var).grid(row=1, column=1, sticky=tk.EW, pady=2)
+        
+        ttk.Label(measurements_frame, text="Age:").grid(row=2, column=0, sticky=tk.W, pady=2)
+        ttk.Entry(measurements_frame, textvariable=self.age_var).grid(row=2, column=1, sticky=tk.EW, pady=2)
+        
+        # History
+        history_frame = ttk.LabelFrame(info_frame, text="Historial", padding=10)
+        history_frame.grid(row=4, column=0, columnspan=2, sticky=tk.NSEW, pady=10)
+        
+        ttk.Label(history_frame, text="Previous Injuries:").grid(row=0, column=0, sticky=tk.W, pady=2)
+        self.injury_history = tk.Text(history_frame, height=4, wrap=tk.WORD)
+        self.injury_history.grid(row=1, column=0, sticky=tk.NSEW, pady=2)
+        
+        info_frame.columnconfigure(1, weight=1)
+        history_frame.columnconfigure(0, weight=1)
+        history_frame.rowconfigure(1, weight=1)
+    
+    def setup_analysis_tab(self, parent):
+        analysis_frame = ttk.Frame(parent, padding=10)
+        analysis_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Analysis buttons
+        button_frame = ttk.Frame(analysis_frame)
+        button_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Button(button_frame, text="Analyze Posture", 
+                  command=lambda: self.analyze("posture")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(button_frame, text="Detect Injuries", 
+                  command=lambda: self.analyze("injuries")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(button_frame, text="Analyze Movement", 
+                  command=lambda: self.analyze("movement")).pack(side=tk.LEFT, padx=2)
+        
+        # Results
+        results_label = ttk.Label(analysis_frame, text="Results of the Analysis:")
+        results_label.pack(anchor=tk.W, pady=(10, 5))
+        
+        # Create a frame with scrollbar for results
+        results_container = ttk.Frame(analysis_frame)
+        results_container.pack(fill=tk.BOTH, expand=True)
+        
+        scrollbar = ttk.Scrollbar(results_container)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.results_text = tk.Text(results_container, wrap=tk.WORD, yscrollcommand=scrollbar.set)
+        self.results_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.results_text.yview)
+        
+        # Initial text
+        self.results_text.insert(tk.END, "Upload a video and make an analysis to see the results.\n")
+        self.results_text.config(state=tk.DISABLED)
+    
+    def setup_feedback_tab(self, parent):
+        feedback_frame = ttk.Frame(parent, padding=10)
+        feedback_frame.pack(fill=tk.BOTH, expand=True)
+        
+        ttk.Label(feedback_frame, text="Recommendations:").pack(anchor=tk.W)
+        
+        # Create a frame with scrollbar for feedback
+        feedback_container = ttk.Frame(feedback_frame)
+        feedback_container.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        scrollbar = ttk.Scrollbar(feedback_container)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.feedback_text = tk.Text(feedback_container, wrap=tk.WORD, yscrollcommand=scrollbar.set)
+        self.feedback_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.feedback_text.yview)
+        
+        # Buttons
+        btn_frame = ttk.Frame(feedback_frame)
+        btn_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Button(btn_frame, text="Generate Feedback", 
+                  command=self.generate_feedback).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Save PDF", 
+                  command=self.save_pdf).pack(side=tk.LEFT, padx=5)
+    
+    def setup_notes_tab(self, parent):
+        notes_frame = ttk.Frame(parent, padding=10)
+        notes_frame.pack(fill=tk.BOTH, expand=True)
+        
+        ttk.Label(notes_frame, text="Additional Notes:").pack(anchor=tk.W)
+        
+        # Create a frame with scrollbar for notes
+        notes_container = ttk.Frame(notes_frame)
+        notes_container.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        scrollbar = ttk.Scrollbar(notes_container)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.notes_text = tk.Text(notes_container, wrap=tk.WORD, yscrollcommand=scrollbar.set)
+        self.notes_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.notes_text.yview)
+        
+        ttk.Button(notes_frame, text="Save Notes", 
+                  command=self.save_notes).pack(anchor=tk.E, pady=5)
+    
+    def browse_video(self):
+        filetypes = (
+            ("Video files", "*.mp4 *.avi *.mov *.mkv *.wmv"),
+            ("All files", "*.*")
+        )
+        
+        video_path = filedialog.askopenfilename(
+            title="Select a video",
+            filetypes=filetypes
+        )
+        
+        if video_path:
+            self.load_video(video_path)
+    
+    def load_video(self, video_path):
+        if self.cap is not None:
+            self.cap.release()
+        
+        self.cap = cv2.VideoCapture(video_path)
+        if not self.cap.isOpened():
+            messagebox.showerror("Error", "We could not upload a video.")
+            return
+        
+        self.selected_video = video_path
+        self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.current_frame_pos = 0
+        self.annotations = []
+        
+        # Reset UI
+        self.progress_var.set(0)
+        self.results_text.config(state=tk.NORMAL)
+        self.results_text.delete(1.0, tk.END)
+        self.results_text.insert(tk.END, f"Uploaded Video: {os.path.basename(video_path)}\n")
+        self.results_text.insert(tk.END, f"Total Frames: {self.frame_count}\n")
+        self.results_text.insert(tk.END, "Make an analysis to see the results.\n")
+        self.results_text.config(state=tk.DISABLED)
+        
+        self.feedback_text.delete(1.0, tk.END)
+        
+        # Show first frame
+        self.update_frame()
+    
+    def update_frame(self):
+        if self.cap is None:
+            return
+        
+        ret, frame = self.cap.read()
+        if not ret:
+            self.reset_video()
+            return
+        
+        # Store current frame for analysis
+        self.current_frame = frame
+        
+        # Resize to fit canvas
+        canvas_width = self.canvas.winfo_width()
+        canvas_height = self.canvas.winfo_height()
+        
+        if canvas_width > 1 and canvas_height > 1:
+            # Calculate aspect ratio
+            frame_height, frame_width = frame.shape[:2]
+            aspect_ratio = frame_width / frame_height
+            
+            # Resize maintaining aspect ratio
+            if canvas_width / canvas_height > aspect_ratio:
+                new_height = canvas_height
+                new_width = int(new_height * aspect_ratio)
+            else:
+                new_width = canvas_width
+                new_height = int(new_width / aspect_ratio)
+            
+            frame = cv2.resize(frame, (new_width, new_height))
+        
+        # Draw annotations on frame
+        for annotation in self.annotations:
+            cv2.circle(frame, (annotation["x"], annotation["y"]), 5, (0, 255, 0), -1)
+            cv2.putText(frame, annotation["text"], (annotation["x"] + 10, annotation["y"]), 
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        
+        # Convert to PhotoImage
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(frame_rgb)
+        img_tk = ImageTk.PhotoImage(image=img)
+        
+        # Update canvas
+        self.canvas.config(width=img.width, height=img.height)
+        self.canvas.create_image(0, 0, anchor=tk.NW, image=img_tk)
+        self.canvas.image = img_tk  # Keep reference
+        
+        # Update progress bar
+        self.current_frame_pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+        if self.frame_count > 0:
+            progress = (self.current_frame_pos / self.frame_count) * 100
+            self.progress_var.set(progress)
+    
+    def toggle_play(self):
+        if self.cap is None:
+            return
+        
+        self.playing = not self.playing
+        
+        if self.playing:
+            self.play_btn.config(text="⏸ Pause")
+            self.play_video()
+        else:
+            self.play_btn.config(text="▶ Play")
+    
+    def play_video(self):
+        if not self.playing or self.cap is None:
+            return
+        
+        self.update_frame()
+        
+        # Check if we've reached the end
+        if self.current_frame_pos >= self.frame_count - 1:
+            self.playing = False
+            self.play_btn.config(text="▶ Play")
+            return
+        
+        # Schedule next frame update (approx. 30 fps)
+        self.root.after(33, self.play_video)
+    
+    def reset_video(self):
+        if self.cap is None:
+            return
+        
+        self.playing = False
+        self.play_btn.config(text="▶ Play")
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        self.current_frame_pos = 0
+        self.progress_var.set(0)
+        self.update_frame()
+    
+    def seek_video(self, value):
+        if self.cap is None or self.frame_count == 0:
+            return
+        
+        # Calculate frame position
+        position = int((float(value) / 100) * self.frame_count)
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, position)
+        self.update_frame()
+    
+    def add_annotation(self, event):
+        if self.current_frame is None:
+            return
+        
+        x, y = event.x, event.y
+        
+        # Create annotation dialog
+        annotation_window = tk.Toplevel(self.root)
+        annotation_window.title("Add Anotations")
+        annotation_window.geometry("300x150")
+        annotation_window.transient(self.root)
+        annotation_window.grab_set()
+        
+        ttk.Label(annotation_window, text="Text of the anotation:").pack(pady=5)
+        
+        text_var = tk.StringVar()
+        text_entry = ttk.Entry(annotation_window, textvariable=text_var)
+        text_entry.pack(fill=tk.X, padx=10, pady=5)
+        text_entry.focus_set()
+        
+        def save_annotation():
+            text = text_var.get()
+            if text:
+                self.annotations.append({"x": x, "y": y, "text": text, "frame": self.current_frame_pos})
+                self.update_frame()  # Redraw frame with new annotation
+            annotation_window.destroy()
+        
+        ttk.Button(annotation_window, text="Save", command=save_annotation).pack(pady=10)
+    
+    def analyze(self, analysis_type):
+        if self.current_frame is None:
+            messagebox.showinfo("NOTE", "Upload a video first.")
+            return
+        
+        # Simulate analysis with progress dialog
+        progress_window = tk.Toplevel(self.root)
+        progress_window.title("Analyzing...")
+        progress_window.geometry("300x100")
+        progress_window.transient(self.root)
+        progress_window.grab_set()
+        
+        ttk.Label(progress_window, text=f"Making the analysis of {analysis_type}...").pack(pady=10)
+        
+        progress_var = tk.DoubleVar()
+        progress = ttk.Progressbar(progress_window, variable=progress_var, maximum=100)
+        progress.pack(fill=tk.X, padx=20, pady=10)
+        
+        def simulate_analysis():
+            for i in range(101):
+                progress_var.set(i)
+                progress_window.update_idletasks()
+                time.sleep(0.02)
+            
+            # Generate analysis results
+            self.generate_analysis_results(analysis_type)
+            progress_window.destroy()
+        
+        threading.Thread(target=simulate_analysis, daemon=True).start()
+    
+    def generate_analysis_results(self, analysis_type):
+        # This would be where real analysis happens
+        # For now, we'll generate some mock results
+        results = {}
+        
+        if analysis_type == "posture":
+            img_gray = cv2.cvtColor(self.current_frame, cv2.COLOR_BGR2GRAY)
+            img_blur = cv2.GaussianBlur(img_gray, (5, 5), 0)
+            edges = cv2.Canny(img_blur, 50, 150)
+            
+            # Simple mock analysis based on edge detection
+            edge_percent = np.sum(edges > 0) / (edges.shape[0] * edges.shape[1])
+            
+            results = {
+                "type": "Analysis of the Posture",
+                "column_alignment": "Normal" if edge_percent < 0.15 else "Posible misalignment",
+                "weight_distribution": "Balanced" if edge_percent < 0.2 else "Unbalanced",
+                "knee_angle": "Adequate" if edge_percent < 0.18 else "Review recommended",
+                "recommendations": [
+                    "Keep your back straight during the exercise",
+                    "Check the height of the seat/equipment",
+                    "Consider core strengthening exercises"
+                ],
+                "risk_level": "Low" if edge_percent < 0.17 else "Moderate"
+            }
+            
+        elif analysis_type == "injuries":
+            # Mock lesion detection
+            results = {
+                "type": "Possible Injury Detection",
+                "risk_areas": [
+                    {"zone": "Right knee", "level": "Moderate", "cause": "Flexion angle"},
+                    {"zone": "Lower back", "level": "Low", "cause": "Curvature"}
+                ],
+                "movement_patterns": "Compensation on right side",
+                "recommendations": [
+                    "Strengthen support muscles around the knee",
+                    "Consider alternative technique to reduce joint stress",
+                    "Evaluate sports footwear"
+                ],
+                "follow_up": "Recomemended in 2 weeks"
+            }
+            
+        elif analysis_type == "movement":
+            # Mock movement analysis
+            results = {
+                "type": "Analysis of Movement",
+                "efficiency": "75%",
+                "symmetry": "15% imbalance towards dominant side",
+                "max_speed": "Adequate for level",
+                "acceleration": "Suboptimal initial phase",
+                "improvement_points": [
+                    "Starting technique",
+                    "Efffort distribution",
+                    "Recovery phase"
+                ],
+                "recommendations": [
+                    "Plyometric exercises to improve start",
+                    "Specific work on breathing technique",
+                    "Sports equipment evaluation"
+                ]
+            }
+        
+        # Store results
+        self.analysis_results[analysis_type] = results
+        
+        # Update UI
+        self.display_analysis_results(results)
+    
+    def display_analysis_results(self, results):
+        if not results:
+            return
+        
+        self.results_text.config(state=tk.NORMAL)
+        self.results_text.delete(1.0, tk.END)
+        
+        # Display results in readable format
+        self.results_text.insert(tk.END, f"=== {results['type']} ===\n\n", "heading")
+        
+        # Format depends on analysis type
+        if results["type"] == "Analysis of the Posture":
+            self.results_text.insert(tk.END, f"• Column alignment: {results['column_alignment']}\n")
+            self.results_text.insert(tk.END, f"• Weight distribution: {results['weight_distribution']}\n")
+            self.results_text.insert(tk.END, f"• Knee angle: {results['knee_angle']}\n")
+            self.results_text.insert(tk.END, f"• Risk level: {results['risk_level']}\n\n")
+            
+        elif results["type"] == "Possible Injury Detection":
+            self.results_text.insert(tk.END, "Identified risk areas:\n")
+            for area in results["risk_areas"]:
+                self.results_text.insert(tk.END, f"• {area['zone']} - Level: {area['level']}\n")
+                self.results_text.insert(tk.END, f"  Likely cause: {area['cause']}\n")
+            
+            self.results_text.insert(tk.END, f"\nMovement patterns: {results['movement_patterns']}\n")
+            self.results_text.insert(tk.END, f"Follow-up: {results['follow_up']}\n\n")
+            
+        elif results["type"] == "Analysis of the Movement":
+            self.results_text.insert(tk.END, f"• Efficiency: {results['efficiency']}\n")
+            self.results_text.insert(tk.END, f"• Symmetry: {results['symmetry']}\n")
+            self.results_text.insert(tk.END, f"• Max speed: {results['max_speed']}\n")
+            self.results_text.insert(tk.END, f"• Acceleration: {results['acceleration']}\n\n")
+            
+            self.results_text.insert(tk.END, "Improvement points:\n")
+            for punto in results["improvement_points"]:
+                self.results_text.insert(tk.END, f"• {punto}\n")
+        
+        self.results_text.insert(tk.END, "\nRecommendations:\n")
+        for rec in results["recommendations"]:
+            self.results_text.insert(tk.END, f"• {rec}\n")
+        
+        self.results_text.config(state=tk.DISABLED)
+    
+    def generate_feedback(self):
+        if not self.analysis_results:
+            messagebox.showinfo("NOTE", "You must perform at least one analysis first.")
+            return
+        
+        # Generate comprehensive feedback based on all analyses
+        self.feedback_text.delete(1.0, tk.END)
+        
+        athlete_name = self.athlete_name.get() or "Athlete"
+        sport = self.sport_type.get() or "sport"
+        
+        self.feedback_text.insert(tk.END, f"ASSESSMENT REPORT FOR {athlete_name.upper()}\n", "heading")
+        self.feedback_text.insert(tk.END, f"Sport: {sport}\n")
+        self.feedback_text.insert(tk.END, f"Date: {self.session_date.get()}\n\n")
+        
+        self.feedback_text.insert(tk.END, "SUMMARY OF ANALYSIS\n", "subheading")
+        self.feedback_text.insert(tk.END, "------------------------\n\n")
+        
+        # Check which analyses were performed
+        if "posture" in self.analysis_results:
+            r = self.analysis_results["posture"]
+            self.feedback_text.insert(tk.END, "POSTURE:\n", "category")
+            self.feedback_text.insert(tk.END, f"The assessment shows a {r['column_alignment'].lower()} alignment. ")
+            self.feedback_text.insert(tk.END, f"A {r['distribución_peso'].lower()} weight distribution was observed and ")
+            self.feedback_text.insert(tk.END, f"the knee angle is {r['ángulo_rodillas'].lower()}.\n\n")
+        
+        if "injuries" in self.analysis_results:
+            r = self.analysis_results["injuries"]
+            self.feedback_text.insert(tk.END, "INJURY RISK:\n", "category")
+            self.feedback_text.insert(tk.END, "The following risk areas were identified:\n")
+            for area in r["risk_areas"]:
+                self.feedback_text.insert(tk.END, f"- {area['zone']}: Risk Level {area['level'].lower()}\n")
+            self.feedback_text.insert(tk.END, f"\nObeserved pattern: {r['movement_patterns']}\n\n")
+        
+        if "movement" in self.analysis_results:
+            r = self.analysis_results["movement"]
+            self.feedback_text.insert(tk.END, "ANALYSIS OF THE MOVEMENT:\n", "category")
+            self.feedback_text.insert(tk.END, f"Movement efficiency: {r['efficiency']}\n")
+            self.feedback_text.insert(tk.END, f"Symmetry: {r['symmetry']}\n")
+            self.feedback_text.insert(tk.END, f"Speed performance: {r['max_speed']}\n")
+            self.feedback_text.insert(tk.END, f"Acceleration: {r['acceleration']}\n\n")
+        
+        # General recommendations
+        self.feedback_text.insert(tk.END, "GENERAL RECOMMENDATIONS\n", "subheading")
+        self.feedback_text.insert(tk.END, "---------------------------\n\n")
+        
+        all_recommendations = []
+        for analysis_type, results in self.analysis_results.items():
+            all_recommendations.extend(results.get("recommendations", []))
+        
+        # Remove duplicates
+        unique_recommendations = list(set(all_recommendations))
+        
+        for i, rec in enumerate(unique_recommendations):
+            self.feedback_text.insert(tk.END, f"{i+1}. {rec}\n")
+        
+        self.feedback_text.insert(tk.END, "\nACTION PLAN\n", "subheading")
+        self.feedback_text.insert(tk.END, "---------------\n\n")
+        
+        # Generate action plan based on analysis
+        self.feedback_text.insert(tk.END, "Short term (1-2 weeks):\n")
+        if "injuries" in self.analysis_results:
+            self.feedback_text.insert(tk.END, "• Modify technique to reduce stress in identified areas\n")
+            self.feedback_text.insert(tk.END, "• Start specific strengthening exercises\n")
+        else:
+            self.feedback_text.insert(tk.END, "• Perform a complete evaluation with a specialist\n")
+            self.feedback_text.insert(tk.END, "• Review sports equipment\n")
+        
+        self.feedback_text.insert(tk.END, "\nMedium term (3-4 weeks):\n")
+        if "posture" in self.analysis_results:
+            self.feedback_text.insert(tk.END, "• Incorporate corrective posture exercises\n")
+        if "movement" in self.analysis_results:
+            self.feedback_text.insert(tk.END, "• Work on technique in specific improvement points\n")
+        self.feedback_text.insert(tk.END, "• Follow-up to evaluate progress\n")
+        
+        self.feedback_text.insert(tk.END, "\nLong term (2-3 months):\n")
+        self.feedback_text.insert(tk.END, "• Incorporate permanent technical changes\n")
+        self.feedback_text.insert(tk.END, "• Personalized injury prevention program\n")
+        self.feedback_text.insert(tk.END, "• Complete progress reevaluation\n")
+        
+        # Apply text tags
+        self.feedback_text.tag_configure("heading", font=("Helvetica", 12, "bold"))
+        self.feedback_text.tag_configure("subheading", font=("Helvetica", 11, "bold"))
+        self.feedback_text.tag_configure("category", font=("Helvetica", 10, "bold"))
+    
+    def save_pdf(self):
+        if not self.feedback_text.get(1.0, tk.END).strip():
+            messagebox.showinfo("NOTE", "No feedback content to save.")
+            return
+        
+        try:
+            from reportlab.lib.pagesizes import letter
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+            from reportlab.lib.styles import getSampleStyleSheet
+            
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".pdf",
+                filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+                title="Save report as PDF"
+            )
+            
+            if not file_path:
+                return
+            
+            # Create PDF
+            doc = SimpleDocTemplate(file_path, pagesize=letter)
+            styles = getSampleStyleSheet()
+            elements = []
+            
+            # Title
+            athlete_name = self.athlete_name.get() or "Athlete"
+            elements.append(Paragraph(f"Report of Athletes: {athlete_name}", styles["Title"]))
+            elements.append(Spacer(1, 12))
+            
+            # Add content from feedback text
+            text_content = self.feedback_text.get(1.0, tk.END)
+            for line in text_content.split('\n'):
+                if line.strip():
+                    if line.isupper():  # Headings
+                        elements.append(Paragraph(line, styles["Heading1"]))
+                    elif line.startswith('--'):  # Separators
+                        elements.append(Spacer(1, 6))
+                    else:
+                        elements.append(Paragraph(line, styles["Normal"]))
+                elements.append(Spacer(1, 6))
+            
+            # Build PDF
+            doc.build(elements)
+            
+            messagebox.showinfo("Success", f"Report saved as {file_path}")
+            
+        except ImportError:
+            messagebox.showerror("Error", "To save as PDF you need to install ReportLab:\n\npip install reportlab")
+        except Exception as e:
+            messagebox.showerror("Error", f"Error saving PDF: {str(e)}")
+    
+    def save_notes(self):
+        notes_text = self.notes_text.get(1.0, tk.END).strip()
+        if not notes_text:
+            messagebox.showinfo("NOTE", "No notes to save.")
+            return
+        
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+            title="Save notes"
+        )
+        
+        if file_path:
+            try:
+                with open(file_path, 'w', encoding='utf-8') as file:
+                    file.write(notes_text)
+                messagebox.showinfo("Success", f"Notes saved in {file_path}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Error saving notes: {str(e)}")
+    
+    def save_analysis(self):
+        if not self.selected_video or not self.analysis_results:
+            messagebox.showinfo("NOTE", "No analysis to save.")
+            return
+        
+        athlete_name = self.athlete_name.get()
+        if not athlete_name:
+            messagebox.showinfo("NOTE", "Please enter the athlete's name.")
+            return
+        
+        # Prepare data to save
+        data = {
+            "athlete": {
+                "name": athlete_name,
+                "sport": self.sport_type.get(),
+                "session_date": self.session_date.get(),
+                "height": self.height_var.get(),
+                "weight": self.weight_var.get(),
+                "age": self.age_var.get(),
+                "injury_history": self.injury_history.get(1.0, tk.END).strip()
+            },
+            "video": os.path.basename(self.selected_video),
+            "analysis_results": self.analysis_results,
+            "annotations": self.annotations,
+            "notes": self.notes_text.get(1.0, tk.END).strip(),
+            "feedback": self.feedback_text.get(1.0, tk.END).strip()
+        }
+        
+        # Create safe filename
+        safe_name = athlete_name.lower().replace(" ", "_")
+        date_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{safe_name}_{date_str}.json"
+        filepath = os.path.join("athlete_data", filename)
+        
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+            
+            messagebox.showinfo("Success", f"Analysis saved as {filename}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Error saving analysis: {str(e)}")
+    
+    def load_analysis(self):
+        filepath = filedialog.askopenfilename(
+            title="Load analysis",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            initialdir="athlete_data"
+        )
+        
+        if not filepath:
+            return
+        
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Load athlete data
+            athlete = data.get("athlete", {})
+            self.athlete_name.set(athlete.get("name", ""))
+            self.sport_type.set(athlete.get("sport", ""))
+            self.session_date.set(athlete.get("session_date", ""))
+            self.height_var.set(athlete.get("height", ""))
+            self.weight_var.set(athlete.get("weight", ""))
+            self.age_var.set(athlete.get("age", ""))
+            
+            self.injury_history.delete(1.0, tk.END)
+            self.injury_history.insert(tk.END, athlete.get("injury_history", ""))
+            
+            # Load annotations and analysis results
+            self.annotations = data.get("annotations", [])
+            self.analysis_results = data.get("analysis_results", {})
+            
+            # Load notes and feedback
+            self.notes_text.delete(1.0, tk.END)
+            self.notes_text.insert(tk.END, data.get("notes", ""))
+            
+            self.feedback_text.delete(1.0, tk.END)
+            self.feedback_text.insert(tk.END, data.get("feedback", ""))
+            
+            # Show analysis results if available
+            if self.analysis_results:
+                for analysis_type, results in self.analysis_results.items():
+                    self.display_analysis_results(results)
+                    break  # Just show the first analysis
+            
+            messagebox.showinfo("Success", "Analysis loaded successfully.")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Error loading analysis: {str(e)}")
+    
+    def show_about(self):
+        about_window = tk.Toplevel(self.root)
+        about_window.title("About")
+        about_window.geometry("400x300")
+        about_window.transient(self.root)
+        about_window.grab_set()
+        
+        ttk.Label(about_window, text="Athletes Analysis", 
+                 font=("Helvetica", 16, "bold")).pack(pady=10)
+        
+        ttk.Label(about_window, text="Versión 1.0", 
+                 font=("Helvetica", 10)).pack()
+        
+        ttk.Separator(about_window, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=20, pady=10)
+        
+        info_text = """
+        This application allows you to analyze athlete videos for:
+        
+        • Assessing posture during physical activity
+        • Detecting possible injury risks
+        • Analyzing movement patterns
+        • Generating personalized recommendations
+        
+        Developed with Python and OpenCV.
+        """
+        
+        ttk.Label(about_window, text=info_text, justify=tk.LEFT, 
+                 wraplength=350).pack(padx=20, pady=10)
+        
+        ttk.Button(about_window, text="Close", 
+                  command=about_window.destroy).pack(pady=10)
+    
+    def show_manual(self):
+        manual_window = tk.Toplevel(self.root)
+        manual_window.title("User Manual")
+        manual_window.geometry("500x400")
+        manual_window.transient(self.root)
+        manual_window.grab_set()
+        
+        # Create notebook for manual sections
+        manual_nb = ttk.Notebook(manual_window)
+        manual_nb.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Create tabs
+        intro_tab = ttk.Frame(manual_nb, padding=10)
+        upload_tab = ttk.Frame(manual_nb, padding=10)
+        analysis_tab = ttk.Frame(manual_nb, padding=10)
+        feedback_tab = ttk.Frame(manual_nb, padding=10)
+        
+        manual_nb.add(intro_tab, text="Introduction")
+        manual_nb.add(upload_tab, text="Upload Video")
+        manual_nb.add(analysis_tab, text="Analysis")
+        manual_nb.add(feedback_tab, text="Feedback")
+        
+        # Intro tab
+        ttk.Label(intro_tab, text="Welcome to the Athlete Analysis Application", 
+                 font=("Helvetica", 12, "bold")).pack(anchor=tk.W)
+        
+        intro_text = """
+        This application is designed to help you analyze athlete videos in different sports to identify potential technique, posture, and injury risk issues.
+        
+        Main Features:
+        • Video Upload and playback
+        • Posture analysis
+        • Injury detection
+        • Movement pattern analysis
+        • Report and recommendation generation
+        """
+        
+        ttk.Label(intro_tab, text=intro_text, justify=tk.LEFT, 
+                 wraplength=450).pack(pady=10)
+        
+        # Upload tab
+        ttk.Label(upload_tab, text="How to upload and play videos", 
+                 font=("Helvetica", 12, "bold")).pack(anchor=tk.W)
+        
+        upload_text = """
+        To upload a video:
+        1. Click "File" in the menu bar
+        2. Select "Open Video"
+        3. Navigate to the video file and select it
+        
+        Playback controls:
+        • Play/Pause Button: Starts or pauses playback
+        • Reset Button: Resets the video to the first frame
+        • Progress Bar: Allows navigation to any point in the video
+        
+        Supported formats: MP4, AVI, MOV, MKV, WMV
+        """
+        
+        ttk.Label(upload_tab, text=upload_text, justify=tk.LEFT, 
+                 wraplength=450).pack(pady=10)
+        
+        # Analysis tab
+        ttk.Label(analysis_tab, text="How to perform analysis", 
+                 font=("Helvetica", 12, "bold")).pack(anchor=tk.W)
+        
+        analysis_text = """
+        To perfomr an analysis:
+        1. Upload a video
+        2. Select the type of analysis you want to perform:
+           • Analysis of the Posture: Evaluates the alignment and posture of the athlete
+           • Injury Detection: Identifies potential risk areas
+           • Analysis of the Movement: Evaluates patterns and efficiency
+        
+        3. The results will appear in the Analysis tab
+        
+        To add annotations to the video:
+        1. Click on any point of the video
+        2. Enter the text for the annotation
+        3. Click "Save"
+        """
+        
+        ttk.Label(analysis_tab, text=analysis_text, justify=tk.LEFT, 
+                 wraplength=450).pack(pady=10)
+        
+        # Feedback tab
+        ttk.Label(feedback_tab, text="Generating Feedback and Reports", 
+                 font=("Helvetica", 12, "bold")).pack(anchor=tk.W)
+        
+        feedback_text = """
+        To generate a complete report:
+        1. Complete at least one analysis
+        2. Enter the athlete's information in the "Athlete" tab
+        3. Go to the "Feedback" tab
+        4. Click "Generate Feedback"
+        
+        The system will automatically generate:
+        • Summary of the analysis performed
+        • Personalized recommendations
+        • Short, medium, and long-term action plan
+        
+        To save the report:
+        • Click "Save PDF" to export the report
+        • You can also have the entire analysis with "File > Save Analysis"
+        """
+        
+        ttk.Label(feedback_tab, text=feedback_text, justify=tk.LEFT, 
+                 wraplength=450).pack(pady=10)
+        
+        ttk.Button(manual_window, text="Close", 
+                  command=manual_window.destroy).pack(pady=10)
+
+# Run the application
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = AthleteAnalysisApp(root)
+    root.mainloop()
