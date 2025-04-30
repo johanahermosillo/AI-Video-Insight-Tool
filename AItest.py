@@ -11,7 +11,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 
 # Configuration settings
-API_KEY = "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"
+API_KEY = "YOUR API KEY    "
 VIDEO_PATH = "boxt.mp4"
 SAMPLE_RATE = 20
 BATCH_SIZE = 5
